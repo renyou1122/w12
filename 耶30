@@ -1,0 +1,164 @@
+from robot_lib import World as BaseWorld, AnimatedRobot as BaseRobot, timer, CELL_SIZE
+
+# --- 1. 定義世界（加入細格） ---
+class MyWorld(BaseWorld):
+    def __init__(self, width=10, height=10, sub_cell=5):
+        super().__init__(width, height)
+        self.sub_cell = sub_cell
+        self.sub_size = CELL_SIZE // sub_cell
+        self._draw_fine_grid()
+
+    def _draw_fine_grid(self):
+        ctx = self.layers["grid"].getContext("2d")
+        ctx.strokeStyle = "#e0e0e0"
+        ctx.lineWidth = 0.5
+        # 畫垂直細線
+        for i in range(self.width * self.sub_cell + 1):
+            x = i * self.sub_size
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, self.height * CELL_SIZE); ctx.stroke()
+        # 畫水平細線
+        for j in range(self.height * self.sub_cell + 1):
+            y = j * self.sub_size
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(self.width * CELL_SIZE, y); ctx.stroke()
+
+    # 細格座標轉換為像素座標
+    def sub_to_px(self, sub_x, sub_y):
+        # 螢幕 X 軸：左->右 (sub_x 越大，px 越大)
+        px = sub_x * self.sub_size + self.sub_size // 2
+        
+        # 螢幕 Y 軸：上->下 (sub_y 越大，py 越大)
+        # 由於 sub_y 已經被設計成「越往下數值越大」，我們不再需要像 BaseWorld 那樣反轉
+        py = sub_y * self.sub_size + self.sub_size // 2
+        return px, py
+
+    # 在細格座標上畫線
+    def draw_line(self, x1, y1, x2, y2):
+        ctx = self.layers["objects"].getContext("2d")
+        ctx.strokeStyle = "#d33"
+        ctx.lineWidth = 9
+        ctx.lineCap = "round"
+        ctx.beginPath()
+        ctx.moveTo(*self.sub_to_px(x1, y1))
+        ctx.lineTo(*self.sub_to_px(x2, y2))
+        ctx.stroke()
+
+# --- 2. 定義機器人（以細格移動） ---
+class MyRobot(BaseRobot):
+    def __init__(self, world, start_sub_x=1, start_sub_y=1):
+        super().__init__(world, start_sub_x // world.sub_cell, start_sub_y // world.sub_cell)
+        # 初始位置轉換為細格中心
+        self.sub_x = start_sub_x # 已經是細格中心
+        self.sub_y = start_sub_y # 已經是細格中心
+        self.robot_size = world.sub_size * 1.8
+
+    # 重新繪製機器人（使用細格座標）
+    def _draw_robot(self):
+        self.robot_ctx.clearRect(0, 0, self.world.width * CELL_SIZE, self.world.height * CELL_SIZE)
+        img = self.images[self.facing]
+        px, py = self.world.sub_to_px(self.sub_x, self.sub_y)
+        s = self.robot_size
+        if img.complete:
+            self.robot_ctx.drawImage(img, px - s//2, py - s//2, s, s)
+
+    # 瞬間移動（不畫線）
+    def teleport_to(self, tx, ty):
+        def action(done):
+            self.sub_x, self.sub_y = tx, ty
+            self._draw_robot()
+            timer.set_timeout(done, 10)
+        self.queue.append(action)
+        self._run_queue()
+
+    # 移動 + 畫線（最核心）
+    def move_to(self, tx, ty, draw_trace=True):
+        def action(done):
+            def step():
+                if self.sub_x == tx and self.sub_y == ty:
+                    done(); return
+                prev_x, prev_y = self.sub_x, self.sub_y
+
+                # 計算方向並轉向
+                dx = tx - self.sub_x
+                dy = ty - self.sub_y
+                
+                # 機器人面向的方向 (BaseRobot 方向：N上/S下/E右/W左)
+                # sub_x 增大：E
+                if dx > 0:    target = "E"
+                # sub_x 減小：W
+                elif dx < 0: target = "W"
+                # sub_y 增大 (螢幕上往下)：S 👈 關鍵修正點
+                elif dy > 0: target = "S"
+                # sub_y 減小 (螢幕上往上)：N 👈 關鍵修正點
+                else:       target = "N" 
+
+                # 同步轉向
+                # 這裡的轉向邏輯可以簡化，直接設定 facing 即可，因為只需要確保面向正確
+                self.facing = target 
+
+                # 移動一步
+                self.sub_x += 1 if dx > 0 else (-1 if dx < 0 else 0)
+                self.sub_y += 1 if dy > 0 else (-1 if dy < 0 else 0)
+
+                if draw_trace:
+                    self.world.draw_line(prev_x, prev_y, self.sub_x, self.sub_y)
+                self._draw_robot()
+                # 調整速度，讓線條更平滑
+                timer.set_timeout(step, 10) # 加快速度
+            step()
+        self.queue.append(action)
+        self._run_queue()
+
+# --- 3. 七段顯示器定義 ---
+SEGMENTS = {
+    0:[1,1,1,1,1,1,0], 1:[0,1,1,0,0,0,0], 2:[1,1,0,1,1,0,1],
+    3:[1,1,1,1,0,0,1], 4:[0,1,1,0,0,1,1], 5:[1,0,1,1,0,1,1],
+    6:[1,0,1,1,1,1,1], 7:[1,1,1,0,0,0,0], 8:[1,1,1,1,1,1,1],
+    9:[1,1,1,1,0,1,1]
+}
+
+# 每個線段的細格座標路徑（相對座標）
+# Y 軸：0 (頂部) -> 6 (底部)
+PATHS = [
+    [(0,0),(1,0),(2,0),(3,0)],             # A 上
+    [(3,0),(3,1),(3,2),(3,3)],             # B 右上
+    [(3,3),(3,4),(3,5),(3,6)],             # C 右下
+    [(3,6),(2,6),(1,6),(0,6)],             # D 下
+    [(0,6),(0,5),(0,4),(0,3)],             # E 左下
+    [(0,3),(0,2),(0,1),(0,0)],             # F 左上
+    [(0,3),(1,3),(2,3),(3,3)]              # G 中
+]
+
+def draw_digit(robot, digit, ox, oy):
+    if digit not in SEGMENTS: return
+    for i, on in enumerate(SEGMENTS[digit]):
+        if not on: continue
+        path = PATHS[i]
+        
+        # 移動到線段起點
+        start_x = ox + path[0][0]
+        start_y = oy + path[0][1] 
+        robot.teleport_to(start_x, start_y)
+        
+        # 畫出線段
+        for j in range(1, len(path)):
+            tx = ox + path[j][0]
+            ty = oy + path[j][1] 
+            robot.move_to(tx, ty, draw_trace=True)
+
+# ==================== 主程式：畫 0123456789 ====================
+# 使用更大的世界，以便容納所有數字
+world = MyWorld(width=15, height=10, sub_cell=5) 
+
+# 數字左上角的起始細格 Y 座標
+START_Y_SUB_CELL = 2
+
+# 機器人從第一個數字的起點開始
+robot = MyRobot(world, 0, 0) # 初始位置不重要，因為會馬上 teleport
+
+for i in range(10):
+    # 每個數字的起始 X 細格座標
+    # 數字寬度為 4 格，間隔 2 格，總共 6 格
+    start_x_offset = 1 + i * 5 
+    draw_digit(robot, i, start_x_offset, START_Y_SUB_CELL)
+
+print("機器人正在寫字：0123456789 (已修正 Y 軸方向判斷與速度)")
